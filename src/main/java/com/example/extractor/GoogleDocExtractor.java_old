@@ -1,0 +1,136 @@
+package com.example.extractor;
+
+import java.util.List;
+import java.util.Map;
+
+import com.google.api.services.docs.v1.model.Document;
+import com.google.api.services.docs.v1.model.InlineObject;
+import com.google.api.services.docs.v1.model.Paragraph;
+import com.google.api.services.docs.v1.model.ParagraphElement;
+import com.google.api.services.docs.v1.model.StructuralElement;
+import com.google.api.services.docs.v1.model.Table;
+import com.google.api.services.docs.v1.model.TableCell;
+import com.google.api.services.docs.v1.model.TableRow;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+
+public class GoogleDocExtractor {
+
+    /**
+     * Top-level method to start the extraction process.
+     */
+    public String extractContentAsJson(Document document) {
+        if (document.getBody() == null || document.getBody().getContent() == null) {
+            return "[]";
+        }
+
+        JsonArray fullDocumentJson = processStructuralElements(
+            document.getBody().getContent(),
+            document.getInlineObjects()
+        );
+
+        Gson gson = new GsonBuilder().setPrettyPrinting().create();
+        return gson.toJson(fullDocumentJson);
+    }
+
+    /**
+     * RECURSIVE CORE: Processes a list of StructuralElements.
+     * This can be the main document body or the content of a table cell.
+     *
+     * @param elements The list of structural elements to process.
+     * @param inlineObjectsMap A map of all inline objects (images) in the document.
+     * @return A JsonArray containing the processed elements.
+     */
+    private JsonArray processStructuralElements(List<StructuralElement> elements, Map<String, InlineObject> inlineObjectsMap) {
+        JsonArray contentArray = new JsonArray();
+        for (StructuralElement structuralElement : elements) {
+            // Case 1: The element is a Paragraph (text, list item, image)
+            if (structuralElement.getParagraph() != null) {
+                contentArray.add(processParagraph(structuralElement.getParagraph(), inlineObjectsMap));
+            }
+            // Case 2: The element is a Table
+            else if (structuralElement.getTable() != null) {
+                contentArray.add(processTable(structuralElement.getTable(), inlineObjectsMap));
+            }
+            // Other cases like SectionBreak could be handled here if needed.
+        }
+        return contentArray;
+    }
+
+    /**
+     * Processes a single Table element by iterating through its rows and cells.
+     */
+    private JsonObject processTable(Table table, Map<String, InlineObject> inlineObjectsMap) {
+        JsonObject tableJson = new JsonObject();
+        tableJson.addProperty("type", "table");
+
+        JsonArray rowsArray = new JsonArray();
+        for (TableRow row : table.getTableRows()) {
+            JsonObject rowJson = new JsonObject();
+            rowJson.addProperty("type", "tableRow");
+
+            JsonArray cellsArray = new JsonArray();
+            for (TableCell cell : row.getTableCells()) {
+                JsonObject cellJson = new JsonObject();
+                cellJson.addProperty("type", "tableCell");
+
+                // RECURSIVE CALL: Process the content of the cell using the same logic.
+                JsonArray cellContent = processStructuralElements(cell.getContent(), inlineObjectsMap);
+                cellJson.add("content", cellContent);
+                cellsArray.add(cellJson);
+            }
+            rowJson.add("cells", cellsArray);
+            rowsArray.add(rowJson);
+        }
+        tableJson.add("rows", rowsArray);
+        return tableJson;
+    }
+
+    /**
+     * Processes a single Paragraph element (no changes from before).
+     * Determines if it's a regular paragraph or a list item and extracts all inner content.
+     */
+    private JsonObject processParagraph(Paragraph paragraph, Map<String, InlineObject> inlineObjectsMap) {
+        JsonObject paragraphJson = new JsonObject();
+        JsonArray contentArray = new JsonArray();
+
+        if (paragraph.getBullet() != null) {
+            paragraphJson.addProperty("type", "listItem");
+            paragraphJson.addProperty("nestingLevel", paragraph.getBullet().getNestingLevel() != null ? paragraph.getBullet().getNestingLevel() : 0);
+            paragraphJson.addProperty("glyph", "●");
+        } else {
+            paragraphJson.addProperty("type", "paragraph");
+        }
+
+        List<ParagraphElement> elements = paragraph.getElements();
+        for (ParagraphElement element : elements) {
+            if (element.getTextRun() != null) {
+                String text = element.getTextRun().getContent();
+                if (text != null && !text.equals("\n")) {
+                    JsonObject textJson = new JsonObject();
+                    textJson.addProperty("type", "text");
+                    textJson.addProperty("value", text);
+                    contentArray.add(textJson);
+                }
+            } else if (element.getInlineObjectElement() != null) {
+                String objectId = element.getInlineObjectElement().getInlineObjectId();
+                if (objectId != null && inlineObjectsMap != null && inlineObjectsMap.containsKey(objectId)) {
+                    JsonObject imageJson = new JsonObject();
+                    InlineObject inlineObject = inlineObjectsMap.get(objectId);
+                    String imageUrl = inlineObject.getInlineObjectProperties()
+                                                  .getEmbeddedObject()
+                                                  .getImageProperties()
+                                                  .getContentUri();
+                    imageJson.addProperty("type", "image");
+                    imageJson.addProperty("objectId", objectId);
+                    imageJson.addProperty("url", imageUrl);
+                    contentArray.add(imageJson);
+                }
+            }
+        }
+        paragraphJson.add("content", contentArray);
+        return paragraphJson;
+    }
+}
