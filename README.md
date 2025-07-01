@@ -1,2 +1,2 @@
 # googledocextractor
-Extractor Contents and Style from Google Documents
+Extract Contents and Style from Google Documents
