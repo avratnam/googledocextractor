@@ -62,6 +62,7 @@ node_modules/
 
 # Google API credentials and tokens
 tokens/
+credentials.json
 *.json
 !pom.xml
 !src/**/*.json
