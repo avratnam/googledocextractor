@@ -5,86 +5,210 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
+@ExtendWith(MockitoExtension.class)
 class GoogleDocExtractorTest {
 
+    private static final String BUCKET_NAME = "test-bucket";
+    private static final String DOC_ID = "doc_id_123";
+    private static final String DOC_TITLE = "Heart Disease - Completed";
+    
+    @Mock
+    private S3Client mockS3Client;
+
+    @Captor
+    private ArgumentCaptor<PutObjectRequest> putObjectRequestCaptor;
+
     private GoogleDocExtractor extractor;
-    private Document mockDocument;
 
     @BeforeEach
     void setUp() {
-        extractor = new GoogleDocExtractor();
-        mockDocument = createMockDocumentWithMixedContent();
-    }
-
-    private Document createMockDocumentWithMixedContent() {
-        Document doc = new Document();
-        Body body = new Body();
-        
-        Map<String, InlineObject> inlineObjects = Map.of(
-            "img_id_1", new InlineObject().setInlineObjectProperties(new InlineObjectProperties().setEmbeddedObject(new EmbeddedObject().setImageProperties(new ImageProperties().setContentUri("http://example.com/image1.jpg")))),
-            "img_id_2", new InlineObject().setInlineObjectProperties(new InlineObjectProperties().setEmbeddedObject(new EmbeddedObject().setImageProperties(new ImageProperties().setContentUri("http://example.com/image2.jpg"))))
-        );
-        doc.setInlineObjects(inlineObjects);
-
-        List<StructuralElement> content = List.of(
-            new StructuralElement().setParagraph(new Paragraph().setElements(List.of(
-                new ParagraphElement().setTextRun(new TextRun().setContent("First paragraph.\n"))
-            ))),
-            new StructuralElement().setParagraph(new Paragraph()
-                .setBullet(new Bullet().setNestingLevel(0))
-                .setElements(List.of(
-                    new ParagraphElement().setTextRun(new TextRun().setContent("List item one.\n"))
-                ))
-            ),
-            new StructuralElement().setParagraph(new Paragraph()
-                .setBullet(new Bullet().setNestingLevel(0))
-                .setElements(List.of(
-                    new ParagraphElement().setTextRun(new TextRun().setContent("List item with image: ")),
-                    new ParagraphElement().setInlineObjectElement(new InlineObjectElement().setInlineObjectId("img_id_2"))
-                ))
-            ),
-            new StructuralElement().setParagraph(new Paragraph().setElements(List.of(
-                new ParagraphElement().setTextRun(new TextRun().setContent("Final paragraph.\n"))
-            )))
-        );
-        body.setContent(content);
-        doc.setBody(body);
-        return doc;
+        // Instantiate the class under test before each test run
+        extractor = new GoogleDocExtractor(mockS3Client, BUCKET_NAME);
     }
 
     @Test
-    @DisplayName("Should extract content in the correct order, including images in lists")
-    void testExtractionOrder() {
+    void testExtractContentAsJson_FullDocument() {
+        // --- ARRANGE ---
+        // Create a mock document with all features: Intro, multiple images, references
+        Document mockDocument = createMockDocument();
+
+        // --- ACT ---
         String jsonString = extractor.extractContentAsJson(mockDocument);
-        Gson gson = new Gson();
-        JsonArray result = gson.fromJson(jsonString, JsonArray.class);
 
-        assertEquals(4, result.size(), "Should be 4 top-level elements");
-        assertEquals("paragraph", result.get(0).getAsJsonObject().get("type").getAsString());
-        assertEquals("listItem", result.get(1).getAsJsonObject().get("type").getAsString());
-        assertEquals("listItem", result.get(2).getAsJsonObject().get("type").getAsString());
-        assertEquals("paragraph", result.get(3).getAsJsonObject().get("type").getAsString());
+        // --- ASSERT ---
+        assertNotNull(jsonString);
+        
+        // Parse the JSON for detailed assertions
+        JsonObject root = new Gson().fromJson(jsonString, JsonObject.class);
 
-        JsonObject listItemWithImage = result.get(2).getAsJsonObject();
-        JsonArray contentOfListItem = listItemWithImage.get("content").getAsJsonArray();
+        // Assert top-level metadata
+        assertEquals("Heart Disease", root.get("article_title").getAsString());
+        assertEquals("This is the introduction text.", root.get("article_info").getAsString());
+        assertEquals("/api/images/heartdisease/doc_id_123/image_001.jpg", root.get("article_image").getAsString());
+
+        // Assert the main document content
+        JsonArray documentArray = root.getAsJsonArray("document");
+        assertNotNull(documentArray);
         
-        assertEquals(2, contentOfListItem.size(), "List item content should have two parts (text and image)");
+        // Expected elements: 1 (Normal Para) + 1 (Image Para) + 1 (Ref Heading) + 1 (Ref Content) = 4
+        assertEquals(4, documentArray.size());
+
+        // 1. Assert the normal text paragraph is present
+        JsonObject normalPara = documentArray.get(0).getAsJsonObject();
+        assertEquals("paragraph", normalPara.get("type").getAsString());
+        assertEquals("A normal paragraph.", normalPara.getAsJsonArray("content").get(0).getAsJsonObject().get("value").getAsString());
+
+        // 2. Assert the second image (with dimensions) is present
+        JsonObject imagePara = documentArray.get(1).getAsJsonObject();
+        assertEquals("paragraph", imagePara.get("type").getAsString());
+        JsonObject imageObject = imagePara.getAsJsonArray("content").get(0).getAsJsonObject();
+        assertEquals("image", imageObject.get("type").getAsString());
+        assertEquals("/api/images/heartdisease/doc_id_123/image_002.jpg", imageObject.get("url").getAsString());
+        assertEquals(640.0, imageObject.get("width").getAsDouble());
+        assertEquals(480.0, imageObject.get("height").getAsDouble());
+
+        // 3. Assert the "References" heading is present
+        JsonObject refHeading = documentArray.get(2).getAsJsonObject();
+        assertEquals("paragraph", refHeading.get("type").getAsString());
+        assertEquals("HEADING_1", refHeading.get("styleType").getAsString());
+        assertEquals("References", refHeading.getAsJsonArray("content").get(0).getAsJsonObject().get("value").getAsString().trim());
         
-        JsonObject textPart = contentOfListItem.get(0).getAsJsonObject();
-        assertEquals("text", textPart.get("type").getAsString());
-        assertEquals("List item with image: ", textPart.get("value").getAsString());
+        // 4. Assert the aggregated references content is present and formatted
+        JsonObject refContent = documentArray.get(3).getAsJsonObject();
+        assertEquals("paragraph", refContent.get("type").getAsString());
+        assertEquals("NORMAL_TEXT", refContent.get("styleType").getAsString());
+        String refValue = refContent.getAsJsonArray("content").get(0).getAsJsonObject().get("value").getAsString();
+        assertEquals("https://url1.com\nhttps://url2.com", refValue); // Check for normalized newlines
+    }
+
+    @Test
+    void testDownloadAndUploadImagesToS3() {
+        // --- ARRANGE ---
+        Document mockDocument = createMockDocument();
+
+        // --- ACT ---
+        extractor.downloadAndUploadImagesToS3(mockDocument);
+
+        // --- ASSERT ---
+        // Verify that putObject was called exactly twice (since there are two images)
+        verify(mockS3Client, times(2)).putObject(putObjectRequestCaptor.capture(), any(RequestBody.class));
         
-        JsonObject imagePart = contentOfListItem.get(1).getAsJsonObject();
-        assertEquals("image", imagePart.get("type").getAsString());
-        assertEquals("img_id_2", imagePart.get("objectId").getAsString());
-        assertEquals("http://example.com/image2.jpg", imagePart.get("url").getAsString());
+        // Get the captured requests
+        List<PutObjectRequest> capturedRequests = putObjectRequestCaptor.getAllValues();
+        assertEquals(2, capturedRequests.size());
+
+        // Assert details of the first image upload
+        PutObjectRequest req1 = capturedRequests.get(0);
+        assertEquals(BUCKET_NAME, req1.bucket());
+        assertEquals("heartdisease/doc_id_123/image_001.jpg", req1.key());
+        assertEquals("image/jpeg", req1.contentType());
+
+        // Assert details of the second image upload
+        PutObjectRequest req2 = capturedRequests.get(1);
+        assertEquals(BUCKET_NAME, req2.bucket());
+        assertEquals("heartdisease/doc_id_123/image_002.jpg", req2.key());
+        assertEquals("image/jpeg", req2.contentType());
+    }
+
+    /**
+     * Helper method to create a complex mock Document object for testing.
+     */
+    private Document createMockDocument() {
+        Document doc = new Document()
+            .setDocumentId(DOC_ID)
+            .setTitle(DOC_TITLE);
+
+        List<StructuralElement> elements = new ArrayList<>();
+        Map<String, InlineObject> inlineObjects = new HashMap<>();
+
+        // 1. Introduction Heading (to be skipped)
+        elements.add(createParagraph("Introduction", "HEADING_1"));
+
+        // 2. Introduction Content (to be moved to article_info)
+        elements.add(createParagraph("This is the introduction text.", "NORMAL_TEXT"));
+        
+        // 3. First Image (to be moved to article_image and removed from body)
+        String firstImageId = "id_image_1";
+        elements.add(createImageParagraph(firstImageId));
+        inlineObjects.put(firstImageId, createInlineImageObject("https://docs.google.com/img/1"));
+
+        // 4. Normal Paragraph
+        elements.add(createParagraph("A normal paragraph.", "NORMAL_TEXT"));
+
+        // 5. Second Image (to remain in body)
+        String secondImageId = "id_image_2";
+        elements.add(createImageParagraph(secondImageId));
+        inlineObjects.put(secondImageId, createInlineImageObjectWithDimensions("https://docs.google.com/img/2", 640.0, 480.0));
+
+        // 6. References Heading
+        elements.add(createParagraph("References", "HEADING_1"));
+
+        // 7. Reference Content (to be aggregated)
+        elements.add(createParagraph("https://url1.com\u000B", "NORMAL_TEXT")); // With vertical tab
+        elements.add(createParagraph("https://url2.com", "NORMAL_TEXT"));
+        
+        doc.setBody(new Body().setContent(elements));
+        doc.setInlineObjects(inlineObjects);
+
+        return doc;
+    }
+
+    private StructuralElement createParagraph(String text, String styleType) {
+        Paragraph paragraph = new Paragraph()
+            .setElements(List.of(
+                new ParagraphElement().setTextRun(new TextRun().setContent(text))
+            ))
+            .setParagraphStyle(new ParagraphStyle().setNamedStyleType(styleType));
+        return new StructuralElement().setParagraph(paragraph);
+    }
+    
+    private StructuralElement createImageParagraph(String objectId) {
+        Paragraph paragraph = new Paragraph()
+            .setElements(List.of(
+                new ParagraphElement().setInlineObjectElement(new InlineObjectElement().setInlineObjectId(objectId))
+            ));
+        return new StructuralElement().setParagraph(paragraph);
+    }
+
+    private InlineObject createInlineImageObject(String contentUri) {
+        return new InlineObject()
+            .setInlineObjectProperties(new InlineObjectProperties()
+                .setEmbeddedObject(new EmbeddedObject()
+                    .setImageProperties(new ImageProperties().setContentUri(contentUri))
+                )
+            );
+    }
+
+    private InlineObject createInlineImageObjectWithDimensions(String contentUri, double width, double height) {
+        return new InlineObject()
+            .setInlineObjectProperties(new InlineObjectProperties()
+                .setEmbeddedObject(new EmbeddedObject()
+                    .setImageProperties(new ImageProperties().setContentUri(contentUri))
+                    .setSize(new Size()
+                        .setWidth(new Dimension().setMagnitude(width))
+                        .setHeight(new Dimension().setMagnitude(height))
+                    )
+                )
+            );
     }
 }
