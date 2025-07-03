@@ -23,6 +23,11 @@ import com.google.api.services.docs.v1.Docs;   // NEW: Used to specify file path
 import com.google.api.services.docs.v1.DocsScopes;
 import com.google.api.services.docs.v1.model.Document;
 
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3.S3Client;
+
 public class Main {
 
     private static final String APPLICATION_NAME = "Google Docs Extractor";
@@ -34,6 +39,13 @@ public class Main {
 
     // NEW: Define the output filename as a constant for easy access
     private static final String OUTPUT_FILENAME = "document_output.json";
+
+    // AWS S3 Configuration
+    private static final String AWS_ACCESS_KEY = EnvLoader.get("AWS_ACCESS_KEY_ID");
+    private static final String AWS_SECRET_KEY = EnvLoader.get("AWS_SECRET_ACCESS_KEY");
+    private static final String AWS_REGION = EnvLoader.get("AWS_REGION", "us-east-1");
+    private static final String S3_BUCKET_NAME = EnvLoader.get("S3_BUCKET_NAME");
+    private static S3Client s3Client;
 
     private static Credential getCredentials() throws Exception {
         InputStream in = Main.class.getResourceAsStream(CREDENTIALS_FILE_PATH);
@@ -73,9 +85,44 @@ public class Main {
         Document document = service.documents().get(DOCUMENT_ID).execute();
         System.out.println("Document fetched: " + document.getTitle());
 
-        // Use our extractor to process the document.
-        GoogleDocExtractor extractor = new GoogleDocExtractor();
+        // Initialize S3 uploader if AWS credentials are available
+        if (AWS_ACCESS_KEY != null && AWS_SECRET_KEY != null && S3_BUCKET_NAME != null) {
+            try {
+                // s3Uploader = new S3Uploader(AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_REGION, S3_BUCKET_NAME);
+                AwsBasicCredentials awsCredentials = AwsBasicCredentials.create(AWS_ACCESS_KEY, AWS_SECRET_KEY);
+                StaticCredentialsProvider credentialsProvider = StaticCredentialsProvider.create(awsCredentials);
+                s3Client = S3Client.builder()
+                                        .region(Region.of(AWS_REGION))
+                                        .credentialsProvider(credentialsProvider)
+                                        .build();
+                System.out.println("S3 uploader initialized successfully");
+                
+                // Check if credentials came from .env.local file
+                if (EnvLoader.has("AWS_ACCESS_KEY_ID")) {
+                    System.out.println("AWS credentials loaded from .env.local file");
+                } else {
+                    System.out.println("AWS credentials loaded from environment variables");
+                }
+            } catch (Exception e) {
+                System.err.println("Failed to initialize S3 uploader: " + e.getMessage());
+                System.err.println("Continuing without S3 upload functionality");
+            }
+        } else {
+            System.out.println("AWS credentials not found. S3 upload functionality disabled.");
+            System.out.println("Create a .env.local file or set environment variables:");
+            System.out.println("  AWS_ACCESS_KEY_ID=your-access-key");
+            System.out.println("  AWS_SECRET_ACCESS_KEY=your-secret-key");
+            System.out.println("  AWS_REGION=us-east-1  # optional, defaults to us-east-1");
+            System.out.println("  S3_BUCKET_NAME=your-bucket-name");
+        }
+
+                  
+        // GoogleDocExtractor extractor = new GoogleDocExtractor();
+
+         // Use our extractor to process the document.   
+        GoogleDocExtractor extractor = new GoogleDocExtractor(s3Client, S3_BUCKET_NAME);
         String jsonOutput = extractor.extractContentAsJson(document);
+        extractor.downloadAndUploadImagesToS3(document);
 
         // --- MODIFIED SECTION: Write JSON to a file ---
         try {
