@@ -70,4 +70,7 @@ src/main/resources/credentials.json
 
 # Temporary files
 *.tmp
-*.temp 
+*.temp
+
+# Maven generated files
+dependency-reduced-pom.xml
